@@ -28,6 +28,20 @@ const char* password = "omokarahisi";
 AsyncWebServer server(80);
 const int stream_delay = 100;  // Delay between frames (ms)
 
+// Camera configuration structure (global to allow updates)
+camera_config_t config;
+
+// Function to initialize or reinitialize the camera with current config
+void initCamera() {
+  esp_camera_deinit();  // Deinitialize if already running
+  esp_err_t err = esp_camera_init(&config);
+  if (err != ESP_OK) {
+    Serial.printf("Camera init failed with error 0x%x\n", err);
+  } else {
+    Serial.println("Camera reinitialized with new settings");
+  }
+}
+
 // Set camera resolution
 void setResolution(framesize_t frameSize) {
   sensor_t *s = esp_camera_sensor_get();
@@ -77,7 +91,7 @@ void handleStream(AsyncWebServerRequest *request) {
   request->send(response);
 }
 
-// Handle settings adjustments
+// Handle settings adjustments, including XCLK and JPEG quality
 void handleControl(AsyncWebServerRequest *request) {
   if (request->hasParam("var") && request->hasParam("val")) {
     String param = request->getParam("var")->value();
@@ -85,7 +99,7 @@ void handleControl(AsyncWebServerRequest *request) {
     int value = valStr.toInt();
 
     sensor_t* s = esp_camera_sensor_get();
-    if (!s) {
+    if (!s && param != "xclk" && param != "quality") {
       request->send(500, "text/plain", "Sensor not found");
       return;
     }
@@ -118,6 +132,29 @@ void handleControl(AsyncWebServerRequest *request) {
       setResolution(frameSize);
       request->send(200, "text/plain", "Resolution set to " + valStr);
       return;
+    } else if (param == "xclk") {
+      // Update XCLK frequency and reinitialize camera
+
+
+      int xclk_freq = value * 1000000;  // Convert MHz to Hz
+      if (xclk_freq < 10000000 || xclk_freq > 20000000) {
+        request->send(400, "text/plain", "XCLK frequency out of range (10-20 MHz)");
+        return;
+      }
+      config.xclk_freq_hz = xclk_freq;
+      initCamera();
+      request->send(200, "text/plain", "XCLK set to " + valStr + " MHz");
+      return;
+    } else if (param == "quality") {
+      // Update JPEG quality
+      if (value < 0 || value > 63) {
+        request->send(400, "text/plain", "JPEG quality out of range (0-63)");
+        return;
+      }
+      config.jpeg_quality = value;
+      initCamera();  // Reinitialize to apply new quality
+      request->send(200, "text/plain", "JPEG quality set to " + valStr);
+      return;
     }
 
     if (res != 0) request->send(500, "text/plain", "Failed to set parameter");
@@ -127,7 +164,7 @@ void handleControl(AsyncWebServerRequest *request) {
   }
 }
 
-// Serve the updated webpage with side-by-side layout
+// Serve the webpage with side-by-side layout and new sliders
 void handleRoot(AsyncWebServerRequest *request) {
   const char html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html>
@@ -195,8 +232,8 @@ void handleRoot(AsyncWebServerRequest *request) {
     <select id="resolution" onchange="setResolution()">
       <option value="QQVGA">QQVGA (160x120)</option>
       <option value="QVGA">QVGA (320x240)</option>
-      <option value="VGA" selected>VGA (640x480)</option>
-      <option value="SVGA">SVGA (800x600)</option>
+      <option value="VGA">VGA (640x480)</option>
+      <option value="SVGA" selected>SVGA (800x600)</option>
     </select>
     <label>Special Effect:</label>
     <select id="special_effect" onchange="setSpecialEffect()">
@@ -208,6 +245,10 @@ void handleRoot(AsyncWebServerRequest *request) {
       <option value="5">Blue Tint</option>
       <option value="6">Sepia</option>
     </select>
+    <label>XCLK Rate (MHz):</label>
+    <input type="range" min="10" max="20" step="1" value="20" oninput="setParam('xclk', this.value)" />
+    <label>JPEG Quality (0-63, lower is better):</label>
+    <input type="range" min="0" max="63" value="0" oninput="setParam('quality', this.value)" />
   </div>
 </body>
 </html>
@@ -219,8 +260,7 @@ void handleRoot(AsyncWebServerRequest *request) {
 void setup() {
   Serial.begin(115200);
 
-  // Camera configuration
-  camera_config_t config;
+  // Initialize camera configuration
   config.ledc_channel = LEDC_CHANNEL_0;
   config.ledc_timer   = LEDC_TIMER_0;
   config.pin_d0       = Y2_GPIO_NUM;
@@ -239,27 +279,27 @@ void setup() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 15000000;  // 15 MHz clock speed
+  config.xclk_freq_hz = 20000000;  // 20 MHz for high performance
   config.pixel_format = PIXFORMAT_JPEG;
-  config.jpeg_quality = 10;  // High quality
-  config.frame_size   = FRAMESIZE_VGA;  // Default resolution
+  config.jpeg_quality = 3;  // Best quality (least compression)
+  config.frame_size   = FRAMESIZE_SVGA;  // 800x600 for higher resolution
   config.fb_count     = 1;
   config.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
-  esp_err_t err = esp_camera_init(&config);
-  if (err != ESP_OK) {
-    Serial.printf("Camera init failed with error 0x%x\n", err);
-    return;
-  }
+  // Initialize camera
+  initCamera();
 
+  // Apply additional sensor settings for enhanced quality
   sensor_t* s = esp_camera_sensor_get();
-  s->set_contrast(s, 2);    // High contrast
-  s->set_sharpness(s, 2);   // High sharpness
-  s->set_brightness(s, 0);
-  s->set_saturation(s, 0);
-  s->set_exposure_ctrl(s, 1);  // Enable AEC
-  s->set_gain_ctrl(s, 1);      // Enable AGC
-  s->set_whitebal(s, 1);       // Enable AWB
+  if (s) {
+    s->set_contrast(s, 2);    // High contrast
+    s->set_sharpness(s, 2);   // High sharpness
+    s->set_brightness(s, 0);
+    s->set_saturation(s, 0);
+    s->set_exposure_ctrl(s, 1);  // Enable AEC
+    s->set_gain_ctrl(s, 1);      // Enable AGC
+    s->set_whitebal(s, 1);       // Enable AWB
+  }
 
   // Connect to Wi-Fi
   WiFi.begin(ssid, password);
@@ -286,5 +326,5 @@ void setup() {
 }
 
 void loop() {
-  // Async server handles requests
+  // Async server handles requests, no additional loop logic needed
 }
