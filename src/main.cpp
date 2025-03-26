@@ -3,11 +3,11 @@
 #include <ESPAsyncWebServer.h>
 #include <AsyncTCP.h>
 
-// Network credentials (replace with your own)
+// Replace with your network credentials
 const char* ssid = "realme C11";
 const char* password = "omokarahisi";
 
-// Camera pin definitions (unchanged as per your working configuration)
+// Camera pin definitions (adjust if necessary for your ESP32-CAM model)
 #define PWDN_GPIO_NUM     -1
 #define RESET_GPIO_NUM    -1
 #define XCLK_GPIO_NUM      15
@@ -26,11 +26,15 @@ const char* password = "omokarahisi";
 #define PCLK_GPIO_NUM      13
 
 AsyncWebServer server(80);
-const int stream_delay = 100;  // Delay between frames in milliseconds
+const int stream_delay = 100;  // Delay between frames (ms)
 
-//
-// Handle MJPEG stream asynchronously
-//
+// Set camera resolution
+void setResolution(framesize_t frameSize) {
+  sensor_t *s = esp_camera_sensor_get();
+  s->set_framesize(s, frameSize);
+}
+
+// Handle MJPEG video stream
 void handleStream(AsyncWebServerRequest *request) {
   AsyncWebServerResponse *response = request->beginChunkedResponse("multipart/x-mixed-replace; boundary=frame", [](uint8_t *buffer, size_t maxLen, size_t index) -> size_t {
     static camera_fb_t *fb = NULL;
@@ -39,10 +43,7 @@ void handleStream(AsyncWebServerRequest *request) {
 
     if (!fb) {
       fb = esp_camera_fb_get();
-      if (!fb) {
-        Serial.println("Camera capture failed");
-        return 0;
-      }
+      if (!fb) return 0;
       bytesSent = 0;
       headerSent = false;
     }
@@ -69,116 +70,154 @@ void handleStream(AsyncWebServerRequest *request) {
         memcpy(buffer + toSend, footer, 2);
         toSend += 2;
       }
-      delay(stream_delay);  // Delay between frames
+      delay(stream_delay);
     }
-
     return toSend;
   });
   request->send(response);
 }
 
-//
-// Handle slider control commands with detailed logging
-//
+// Handle settings adjustments
 void handleControl(AsyncWebServerRequest *request) {
-  Serial.println("Received control request");
   if (request->hasParam("var") && request->hasParam("val")) {
     String param = request->getParam("var")->value();
-    int value = request->getParam("val")->value().toInt();
-    Serial.print("Control command: ");
-    Serial.print(param);
-    Serial.print(" = ");
-    Serial.println(value);
+    String valStr = request->getParam("val")->value();
+    int value = valStr.toInt();
 
     sensor_t* s = esp_camera_sensor_get();
     if (!s) {
-      Serial.println("Sensor not found");
       request->send(500, "text/plain", "Sensor not found");
       return;
     }
 
     int res = -1;
-    if (param == "brightness") {
-      Serial.print("Current brightness: ");
-      Serial.println(s->status.brightness);
-      res = s->set_brightness(s, value);
-      Serial.print("New brightness: ");
-      Serial.println(s->status.brightness);
-    } else if (param == "contrast") {
-      Serial.print("Current contrast: ");
-      Serial.println(s->status.contrast);
-      res = s->set_contrast(s, value);
-      Serial.print("New contrast: ");
-      Serial.println(s->status.contrast);
-    } else if (param == "saturation") {
-      Serial.print("Current saturation: ");
-      Serial.println(s->status.saturation);
-      res = s->set_saturation(s, value);
-      Serial.print("New saturation: ");
-      Serial.println(s->status.saturation);
-    } else if (param == "sharpness") {
-      Serial.print("Current sharpness: ");
-      Serial.println(s->status.sharpness);
-      res = s->set_sharpness(s, value);
-      Serial.print("New sharpness: ");
-      Serial.println(s->status.sharpness);
+    if (param == "brightness") res = s->set_brightness(s, value);
+    else if (param == "contrast") res = s->set_contrast(s, value);
+    else if (param == "saturation") res = s->set_saturation(s, value);
+    else if (param == "sharpness") res = s->set_sharpness(s, value);
+    else if (param == "aec_value") res = s->set_aec_value(s, value);
+    else if (param == "agc_gain") res = s->set_agc_gain(s, value);
+    else if (param == "awb_gain") res = s->set_awb_gain(s, value);
+    else if (param == "aec") res = s->set_exposure_ctrl(s, value);
+    else if (param == "agc") res = s->set_gain_ctrl(s, value);
+    else if (param == "awb") res = s->set_whitebal(s, value);
+    else if (param == "vflip") res = s->set_vflip(s, value);
+    else if (param == "hmirror") res = s->set_hmirror(s, value);
+    else if (param == "colorbar") res = s->set_colorbar(s, value);
+    else if (param == "special_effect") res = s->set_special_effect(s, value);
+    else if (param == "resolution") {
+      framesize_t frameSize;
+      if (valStr == "QQVGA") frameSize = FRAMESIZE_QQVGA;
+      else if (valStr == "QVGA") frameSize = FRAMESIZE_QVGA;
+      else if (valStr == "VGA") frameSize = FRAMESIZE_VGA;
+      else if (valStr == "SVGA") frameSize = FRAMESIZE_SVGA;
+      else {
+        request->send(400, "text/plain", "Invalid resolution");
+        return;
+      }
+      setResolution(frameSize);
+      request->send(200, "text/plain", "Resolution set to " + valStr);
+      return;
     }
 
-    if (res != 0) {
-      Serial.println("Failed to set parameter");
-      request->send(500, "text/plain", "Failed to set parameter");
-    } else {
-      request->send(200, "text/plain", "OK");
-    }
+    if (res != 0) request->send(500, "text/plain", "Failed to set parameter");
+    else request->send(200, "text/plain", "OK");
   } else {
     request->send(400, "text/plain", "Missing parameters");
   }
 }
 
-//
-// Serve the web page with the live stream and slider controls
-//
+// Serve the updated webpage with side-by-side layout
 void handleRoot(AsyncWebServerRequest *request) {
   const char html[] PROGMEM = R"rawliteral(
+<!DOCTYPE html>
 <html>
-  <head>
-    <title>ESP32-CAM Stream & Control</title>
-    <style>
-      body { font-family: Arial; text-align: center; }
-    </style>
-    <script>
-      function setParam(param, value) {
-        console.log("Slider changed: " + param + " = " + value);
-        var xhr = new XMLHttpRequest();
-        xhr.open("GET", "/control?var=" + param + "&val=" + value + "&t=" + new Date().getTime(), true);
-        xhr.send();
-      }
-    </script>
-  </head>
-  <body>
-    <h1>ESP32-CAM Stream & Control</h1>
-    <img src="/stream" style="width:640px" /><br/><br/>
-    <label>Brightness:</label><br/>
-    <input type="range" min="-2" max="2" step="1" value="0" oninput="setParam('brightness', this.value)" /><br/><br/>
-    <label>Contrast:</label><br/>
-    <input type="range" min="-2" max="2" step="1" value="2" oninput="setParam('contrast', this.value)" /><br/><br/>
-    <label>Saturation:</label><br/>
-    <input type="range" min="-2" max="2" step="1" value="0" oninput="setParam('saturation', this.value)" /><br/><br/>
-    <label>Sharpness:</label><br/>
-    <input type="range" min="-2" max="2" step="1" value="2" oninput="setParam('sharpness', this.value)" /><br/><br/>
-  </body>
+<head>
+  <title>ESP32-CAM Control</title>
+  <style>
+    body { font-family: Arial, sans-serif; display: flex; margin: 0; padding: 20px; }
+    .video-container { flex: 3; margin-right: 20px; }
+    .settings-panel { flex: 1; background-color: #f0f0f0; padding: 20px; border-radius: 5px; }
+    .settings-panel label { display: block; margin: 10px 0 5px; font-weight: bold; }
+    .settings-panel input, .settings-panel select { width: 100%; box-sizing: border-box; }
+    img { width: 100%; max-width: 800px; height: auto; }
+  </style>
+  <script>
+    function setParam(param, value) {
+      var xhr = new XMLHttpRequest();
+      xhr.open("GET", "/control?var=" + param + "&val=" + value + "&t=" + new Date().getTime(), true);
+      xhr.send();
+    }
+    function setResolution() {
+      var res = document.getElementById("resolution").value;
+      setParam("resolution", res);
+    }
+    function setSpecialEffect() {
+      var effect = document.getElementById("special_effect").value;
+      setParam("special_effect", effect);
+    }
+  </script>
+</head>
+<body>
+  <div class="video-container">
+    <h1>Video Stream</h1>
+    <img src="/stream" alt="Video Stream" />
+  </div>
+  <div class="settings-panel">
+    <h2>Camera Settings</h2>
+    <label>Brightness:</label>
+    <input type="range" min="-2" max="2" value="0" oninput="setParam('brightness', this.value)" />
+    <label>Contrast:</label>
+    <input type="range" min="-2" max="2" value="2" oninput="setParam('contrast', this.value)" />
+    <label>Saturation:</label>
+    <input type="range" min="-2" max="2" value="0" oninput="setParam('saturation', this.value)" />
+    <label>Sharpness:</label>
+    <input type="range" min="-2" max="2" value="2" oninput="setParam('sharpness', this.value)" />
+    <label>Exposure (AEC Value):</label>
+    <input type="range" min="0" max="1200" step="10" value="500" oninput="setParam('aec_value', this.value)" />
+    <label>Gain (AGC Value):</label>
+    <input type="range" min="0" max="30" value="0" oninput="setParam('agc_gain', this.value)" />
+    <label>White Balance Gain:</label>
+    <input type="range" min="0" max="2" value="1" oninput="setParam('awb_gain', this.value)" />
+    <label>Auto-Exposure (AEC):</label>
+    <input type="checkbox" checked onchange="setParam('aec', this.checked ? 1 : 0)" />
+    <label>Auto-Gain (AGC):</label>
+    <input type="checkbox" checked onchange="setParam('agc', this.checked ? 1 : 0)" />
+    <label>Auto-White Balance (AWB):</label>
+    <input type="checkbox" checked onchange="setParam('awb', this.checked ? 1 : 0)" />
+    <label>Vertical Flip:</label>
+    <input type="checkbox" onchange="setParam('vflip', this.checked ? 1 : 0)" />
+    <label>Horizontal Mirror:</label>
+    <input type="checkbox" onchange="setParam('hmirror', this.checked ? 1 : 0)" />
+    <label>Color Bar:</label>
+    <input type="checkbox" onchange="setParam('colorbar', this.checked ? 1 : 0)" />
+    <label>Resolution:</label>
+    <select id="resolution" onchange="setResolution()">
+      <option value="QQVGA">QQVGA (160x120)</option>
+      <option value="QVGA">QVGA (320x240)</option>
+      <option value="VGA" selected>VGA (640x480)</option>
+      <option value="SVGA">SVGA (800x600)</option>
+    </select>
+    <label>Special Effect:</label>
+    <select id="special_effect" onchange="setSpecialEffect()">
+      <option value="0">None</option>
+      <option value="1">Negative</option>
+      <option value="2">Grayscale</option>
+      <option value="3">Red Tint</option>
+      <option value="4">Green Tint</option>
+      <option value="5">Blue Tint</option>
+      <option value="6">Sepia</option>
+    </select>
+  </div>
+</body>
 </html>
 )rawliteral";
   request->send(200, "text/html", html);
 }
 
-//
-// Setup: initialize camera, Wi-Fi, and web server endpoints
-//
+// Setup function
 void setup() {
   Serial.begin(115200);
-  Serial.setDebugOutput(true);
-  Serial.println();
 
   // Camera configuration
   camera_config_t config;
@@ -200,20 +239,12 @@ void setup() {
   config.pin_sccb_scl = SIOC_GPIO_NUM;
   config.pin_pwdn     = PWDN_GPIO_NUM;
   config.pin_reset    = RESET_GPIO_NUM;
-  config.xclk_freq_hz = 15000000;
+  config.xclk_freq_hz = 15000000;  // 15 MHz clock speed
   config.pixel_format = PIXFORMAT_JPEG;
-  config.jpeg_quality = 10;  // High quality (lower number means higher quality)
-  config.frame_size   = FRAMESIZE_VGA;  // 640x480 for better text capture
-
-  // Use PSRAM if available for frame buffer
-  if (psramFound()) {
-    config.fb_location = CAMERA_FB_IN_PSRAM;
-    Serial.println("Using PSRAM for frame buffer");
-  } else {
-    config.fb_location = CAMERA_FB_IN_DRAM;
-    Serial.println("Using DRAM for frame buffer");
-  }
+  config.jpeg_quality = 10;  // High quality
+  config.frame_size   = FRAMESIZE_VGA;  // Default resolution
   config.fb_count     = 1;
+  config.fb_location  = psramFound() ? CAMERA_FB_IN_PSRAM : CAMERA_FB_IN_DRAM;
 
   esp_err_t err = esp_camera_init(&config);
   if (err != ESP_OK) {
@@ -222,44 +253,38 @@ void setup() {
   }
 
   sensor_t* s = esp_camera_sensor_get();
-  s->set_contrast(s, 2);    // High contrast for text
-  s->set_sharpness(s, 2);   // High sharpness for text
+  s->set_contrast(s, 2);    // High contrast
+  s->set_sharpness(s, 2);   // High sharpness
   s->set_brightness(s, 0);
   s->set_saturation(s, 0);
-  // s->set_exposure_ctrl(s, false);  // Optional: disable auto-exposure for manual control
+  s->set_exposure_ctrl(s, 1);  // Enable AEC
+  s->set_gain_ctrl(s, 1);      // Enable AGC
+  s->set_whitebal(s, 1);       // Enable AWB
 
-  Serial.printf("Free heap after camera init: %u bytes\n", ESP.getFreeHeap());
-  Serial.println("Connecting to Wi-Fi...");
-
+  // Connect to Wi-Fi
   WiFi.begin(ssid, password);
-  int timeout = 100;
-  while (WiFi.status() != WL_CONNECTED && timeout > 0) {
+  while (WiFi.status() != WL_CONNECTED && millis() < 30000) {
     delay(500);
     Serial.print(".");
-    timeout--;
   }
   if (WiFi.status() == WL_CONNECTED) {
     Serial.println("\nWi-Fi connected");
-    Serial.print("IP Address: ");
+    Serial.print("IP: ");
     Serial.println(WiFi.localIP());
   } else {
-    Serial.println("\nFailed to connect to Wi-Fi.");
+    Serial.println("\nWi-Fi connection failed");
     return;
   }
 
-  // Set up server endpoints
+  // Start server
   server.on("/", handleRoot);
   server.on("/stream", handleStream);
   server.on("/control", handleControl);
   server.begin();
-  Serial.print("Camera Stream Ready! Go to: http://");
-  Serial.print(WiFi.localIP());
-  Serial.println("/");
+  Serial.print("Camera ready at: http://");
+  Serial.println(WiFi.localIP());
 }
 
-//
-// Main loop: nothing needed with AsyncWebServer
-//
 void loop() {
-  // AsyncWebServer handles requests in the background
+  // Async server handles requests
 }
